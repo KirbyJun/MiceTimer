@@ -85,29 +85,26 @@ DEFAULT_PARADIGMS = [
     {
         "name": "三箱社交",
         "items": [
-            {"kind": "timer", "name": "陌生鼠侧探索时间"},
-            {"kind": "timer", "name": "空侧探索时间"},
-            {"kind": "counter", "name": "陌生鼠侧进入次数"},
-            {"kind": "counter", "name": "空侧进入次数"},
+            {"kind": "timer", "name": "学习小鼠与真鼠社交的时间"},
+            {"kind": "timer", "name": "与玩具社交的时间"},
         ],
     },
     {
         "name": "自由社交",
         "items": [
-            {"kind": "timer", "name": "社交时间"},
-            {"kind": "timer", "name": "非社交时间"},
-            {"kind": "counter", "name": "社交接触次数"},
+            {"kind": "timer", "name": "实验鼠适应时间"},
+            {"kind": "timer", "name": "嗅探社交鼠时间"},
+            {"kind": "counter", "name": "躲避社交鼠嗅探的次数"},
         ],
     },
     {
         "name": "都做",
         "items": [
-            {"kind": "timer", "name": "陌生鼠侧探索时间"},
-            {"kind": "timer", "name": "空侧探索时间"},
-            {"kind": "timer", "name": "社交时间"},
-            {"kind": "counter", "name": "陌生鼠侧进入次数"},
-            {"kind": "counter", "name": "空侧进入次数"},
-            {"kind": "counter", "name": "社交接触次数"},
+            {"kind": "timer", "name": "学习小鼠与真鼠社交的时间"},
+            {"kind": "timer", "name": "与玩具社交的时间"},
+            {"kind": "timer", "name": "实验鼠适应时间"},
+            {"kind": "timer", "name": "嗅探社交鼠时间"},
+            {"kind": "counter", "name": "躲避社交鼠嗅探的次数"},
         ],
     },
 ]
