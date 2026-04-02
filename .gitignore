@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+*.spec
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# PyInstaller
+releases/
+
+# Data directories (auto-generated at runtime)
+data/autosave/
+data/export/
+data/templates/
+
+# Settings and state files
+data/settings.json
+data/recent_template.json
+version.txt
+build_log.txt
+
+# UPX binary
+upx/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
