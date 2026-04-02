@@ -118,7 +118,6 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "reset": "F6",
         "export": "F7",
     },
-    "global_hotkeys": False,
 }
 
 # ---------------------------------------------------------------------------
@@ -282,44 +281,6 @@ def save_recent_template(template: dict):
 
 
 # ---------------------------------------------------------------------------
-# Global hotkey manager (using `keyboard` library)
-# ---------------------------------------------------------------------------
-
-_keyboard_available = False
-try:
-    import keyboard as _kb
-    _keyboard_available = True
-except ImportError:
-    pass
-
-
-class GlobalHotkeyManager:
-    """Thin wrapper around `keyboard` library for global hotkeys."""
-
-    def __init__(self):
-        self._hooks: List = []
-
-    def clear(self):
-        if not _keyboard_available:
-            return
-        for h in self._hooks:
-            try:
-                _kb.remove_hotkey(h)
-            except Exception:
-                pass
-        self._hooks.clear()
-
-    def register(self, key: str, callback):
-        if not _keyboard_available or not key:
-            return
-        try:
-            h = _kb.add_hotkey(key, callback, suppress=False)
-            self._hooks.append(h)
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
 # Settings Dialog
 # ---------------------------------------------------------------------------
 
@@ -391,6 +352,7 @@ class ItemRowWidget(QWidget):
     incremented = Signal(int)
     decremented = Signal(int)
     name_changed = Signal(int, str)
+    deleted = Signal(int)   # row index
 
     def __init__(self, index: int, item: Item, parent=None):
         super().__init__(parent)
@@ -401,6 +363,15 @@ class ItemRowWidget(QWidget):
     def _build_ui(self):
         row = QHBoxLayout(self)
         row.setContentsMargins(4, 2, 4, 2)
+
+        # Index label (1-based)
+        idx_label = QLabel(f"{self._index + 1}.")
+        idx_label.setFixedWidth(24)
+        idx_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        font_idx = QFont()
+        font_idx.setBold(True)
+        idx_label.setFont(font_idx)
+        row.addWidget(idx_label)
 
         # Name (editable)
         self._name_edit = QLineEdit(self._item.name)
@@ -442,6 +413,14 @@ class ItemRowWidget(QWidget):
 
         row.addStretch()
 
+        # Delete button
+        btn_del = QPushButton("✕")
+        btn_del.setToolTip("删除此项目")
+        btn_del.setFixedWidth(30)
+        btn_del.setStyleSheet("color: #cc0000;")
+        btn_del.clicked.connect(lambda: self.deleted.emit(self._index))
+        row.addWidget(btn_del)
+
     def _on_name_changed(self, text: str):
         self.name_changed.emit(self._index, text)
 
@@ -472,7 +451,6 @@ class MainWindow(QMainWindow):
 
         self._settings = load_settings()
         self._exp = Experiment()
-        self._global_hk_mgr = GlobalHotkeyManager()
         self._item_row_widgets: List[ItemRowWidget] = []
 
         self._tick_timer = QTimer(self)
@@ -552,13 +530,10 @@ class MainWindow(QMainWindow):
         item_btn_row = QHBoxLayout()
         btn_add_timer = QPushButton("+ 计时项")
         btn_add_counter = QPushButton("+ 计数项")
-        btn_remove = QPushButton("删除最后一项")
         btn_add_timer.clicked.connect(lambda: self._add_item("timer"))
         btn_add_counter.clicked.connect(lambda: self._add_item("counter"))
-        btn_remove.clicked.connect(self._remove_last_item)
         item_btn_row.addWidget(btn_add_timer)
         item_btn_row.addWidget(btn_add_counter)
-        item_btn_row.addWidget(btn_remove)
         item_btn_row.addStretch()
         items_outer.addLayout(item_btn_row)
 
@@ -698,6 +673,7 @@ class MainWindow(QMainWindow):
             w.incremented.connect(self._increment_counter)
             w.decremented.connect(self._decrement_counter)
             w.name_changed.connect(self._on_item_name_changed)
+            w.deleted.connect(self._delete_item)
             self._items_layout.addWidget(w)
             self._item_row_widgets.append(w)
 
@@ -707,6 +683,13 @@ class MainWindow(QMainWindow):
         name = "新计时项" if kind == "timer" else "新计数项"
         item = Item(kind, name)
         self._exp.items.append(item)
+        self._rebuild_item_rows()
+        self.save_autosave()
+
+    def _delete_item(self, index: int):
+        if index < 0 or index >= len(self._exp.items):
+            return
+        self._exp.items.pop(index)
         self._rebuild_item_rows()
         self.save_autosave()
 
@@ -722,16 +705,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _apply_hotkeys(self):
-        # Remove old global hooks
-        self._global_hk_mgr.clear()
-
-        hk = self._settings["hotkeys"]
-        use_global = self._settings.get("global_hotkeys", False)
-
-        if use_global:
-            self._global_hk_mgr.register(hk.get("start_stop", ""), self._on_start_stop)
-            self._global_hk_mgr.register(hk.get("reset", ""), self._on_reset)
-            self._global_hk_mgr.register(hk.get("export", ""), self.export_excel_default)
+        pass  # hotkeys are handled via keyPressEvent (window-focused only)
 
     def keyPressEvent(self, event):
         hk = self._settings["hotkeys"]
@@ -764,6 +738,25 @@ class MainWindow(QMainWindow):
             self.export_excel_default()
             event.accept()
             return
+
+        # Delete key: delete the last item
+        if event.key() == Qt.Key_Delete:
+            self._remove_last_item()
+            event.accept()
+            return
+
+        # Digit keys 1-9: toggle timer or increment counter for that item
+        key = event.key()
+        if Qt.Key_1 <= key <= Qt.Key_9:
+            idx = key - Qt.Key_1  # 0-based index
+            if idx < len(self._exp.items):
+                item = self._exp.items[idx]
+                if item.kind == "timer":
+                    self._toggle_timer(idx)
+                else:
+                    self._increment_counter(idx)
+                event.accept()
+                return
 
         super().keyPressEvent(event)
 
@@ -1165,7 +1158,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.save_autosave()
-        self._global_hk_mgr.clear()
         self._tick_timer.stop()
         event.accept()
 
