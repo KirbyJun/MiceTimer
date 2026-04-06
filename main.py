@@ -1,6 +1,7 @@
 """
-MiceTimer - 实验计时计数软件
+MiceTimer v2.0 - 实验计时计数软件
 PySide6 GUI, Windows-compatible
+Hierarchical: Paradigm → Groups (对照/实验) → Subjects → Items
 """
 from __future__ import annotations
 
@@ -12,27 +13,19 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import (
-    QSize,
-    Qt,
-    QTimer,
-    Signal,
-)
-from PySide6.QtGui import (
-    QColor,
-    QFont,
-    QKeySequence,
-    QPalette,
-)
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
@@ -41,7 +34,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSplitter,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -55,10 +47,10 @@ from openpyxl import Workbook
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
+
 def _app_dir() -> str:
     """Return the directory where the application executable (or script) lives."""
     if getattr(sys, "frozen", False):
-        # PyInstaller bundle
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
@@ -79,35 +71,28 @@ MAX_FILENAME_PART_LENGTH = 30
 MAX_RECENT_TEMPLATES = 10
 
 # ---------------------------------------------------------------------------
-# Default paradigms / items
+# Paradigm / group constants
 # ---------------------------------------------------------------------------
-DEFAULT_PARADIGMS = [
-    {
-        "name": "三箱社交",
-        "items": [
-            {"kind": "timer", "name": "学习小鼠与真鼠社交的时间"},
-            {"kind": "timer", "name": "与玩具社交的时间"},
-        ],
-    },
-    {
-        "name": "自由社交",
-        "items": [
-            {"kind": "timer", "name": "实验鼠适应时间"},
-            {"kind": "timer", "name": "嗅探社交鼠时间"},
-            {"kind": "counter", "name": "躲避社交鼠嗅探的次数"},
-        ],
-    },
-    {
-        "name": "都做",
-        "items": [
-            {"kind": "timer", "name": "学习小鼠与真鼠社交的时间"},
-            {"kind": "timer", "name": "与玩具社交的时间"},
-            {"kind": "timer", "name": "实验鼠适应时间"},
-            {"kind": "timer", "name": "嗅探社交鼠时间"},
-            {"kind": "counter", "name": "躲避社交鼠嗅探的次数"},
-        ],
-    },
-]
+
+PARADIGM_3SIT = "3-SIT"
+PARADIGM_FREESIT = "Free-SIT"
+ALL_PARADIGMS = [PARADIGM_3SIT, PARADIGM_FREESIT]
+
+GROUP_CONTROL = "对照组"
+GROUP_EXPERIMENT = "实验组"
+ALL_GROUPS = [GROUP_CONTROL, GROUP_EXPERIMENT]
+
+DEFAULT_ITEMS: Dict[str, List[Dict]] = {
+    PARADIGM_3SIT: [
+        {"kind": "timer", "name": "Mice/s"},
+        {"kind": "timer", "name": "Toy/s"},
+    ],
+    PARADIGM_FREESIT: [
+        {"kind": "timer", "name": "适应时间/s"},
+        {"kind": "timer", "name": "嗅探时间/s"},
+        {"kind": "counter", "name": "躲避次数"},
+    ],
+}
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "hotkeys": {
@@ -118,16 +103,100 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 }
 
 # ---------------------------------------------------------------------------
+# Format helpers
+# ---------------------------------------------------------------------------
+
+def fmt_ssxx(seconds: float) -> str:
+    """Format seconds -> SS.xx (truncate to centiseconds)."""
+    if seconds < 0:
+        seconds = 0.0
+    total_cs = int(seconds * 100)
+    s = total_cs // 100
+    cs = total_cs % 100
+    return f"{s}.{cs:02d}"
+
+
+def fmt_ssxx_signed(seconds: float) -> str:
+    """Format possibly-negative seconds -> ±SS.xx."""
+    if seconds < 0:
+        return f"-{fmt_ssxx(-seconds)}"
+    return fmt_ssxx(seconds)
+
+
+def safe_name_part(s: str) -> str:
+    """Make a string safe for use as a filename component."""
+    if not s:
+        return ""
+    return "".join(c for c in s if c.isalnum() or c in "-_ ")[:MAX_FILENAME_PART_LENGTH].strip()
+
+
+def calc_di(mice_s: float, toy_s: float) -> str:
+    """Return DI = (Mice-Toy)/(Mice+Toy) formatted to 6 decimal places, or '' if denominator is 0."""
+    mice_plus_toy = mice_s + toy_s
+    if mice_plus_toy == 0:
+        return ""
+    return f"{(mice_s - toy_s) / mice_plus_toy:.6f}"
+
+
+# ---------------------------------------------------------------------------
+# Settings helpers
+# ---------------------------------------------------------------------------
+
+def load_settings() -> dict:
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            merged = deepcopy(DEFAULT_SETTINGS)
+            for k, v in data.items():
+                if k == "hotkeys" and isinstance(v, dict):
+                    merged["hotkeys"].update(v)
+                else:
+                    merged[k] = v
+            return merged
+        except Exception:
+            pass
+    return deepcopy(DEFAULT_SETTINGS)
+
+
+def save_settings(settings: dict):
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=2)
+
+
+def load_recent_templates() -> List[dict]:
+    if os.path.exists(RECENT_TEMPLATE_FILE):
+        try:
+            with open(RECENT_TEMPLATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return []
+
+
+def save_recent_template(template: dict):
+    recent = load_recent_templates()
+    name = template.get("name", "")
+    recent = [t for t in recent if t.get("name") != name]
+    recent.insert(0, template)
+    recent = recent[:MAX_RECENT_TEMPLATES]
+    with open(RECENT_TEMPLATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(recent, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
 
 class Item:
     def __init__(self, kind: str, name: str):
-        self.kind: str = kind          # "timer" | "counter"
+        self.kind: str = kind           # "timer" | "counter"
         self.name: str = name
-        self.elapsed: float = 0.0      # seconds (timer)
-        self.count: int = 0            # (counter)
-        self.running: bool = False     # timer only
+        self.elapsed: float = 0.0       # seconds (timer)
+        self.count: int = 0             # (counter)
+        self.running: bool = False      # timer only
         self.last_start_ts: Optional[float] = None
 
     def to_dict(self) -> dict:
@@ -161,120 +230,149 @@ class Item:
         return self.elapsed
 
 
-class Experiment:
-    def __init__(self):
-        self.date: str = datetime.now().strftime("%Y-%m-%d")
-        self.operator: str = ""
-        self.mouse_id: str = ""
-        self.group: str = ""
-        self.paradigm: str = ""
-        self.remark: str = ""
-        self.items: List[Item] = []
-        self.events: List[dict] = []
+class Subject:
+    """One experimental subject (e.g., B21) belonging to a group."""
+
+    def __init__(self, name: str, paradigm: str):
+        self.name: str = name
+        self.paradigm: str = paradigm
+        self.items: List[Item] = [
+            Item(it["kind"], it["name"])
+            for it in DEFAULT_ITEMS.get(paradigm, [])
+        ]
         self.started: bool = False
         self.start_time: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
-            "date": self.date,
-            "operator": self.operator,
-            "mouse_id": self.mouse_id,
-            "group": self.group,
+            "name": self.name,
             "paradigm": self.paradigm,
-            "remark": self.remark,
             "items": [it.to_dict() for it in self.items],
-            "events": self.events,
             "started": self.started,
             "start_time": self.start_time,
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Experiment":
-        exp = cls()
-        exp.date = d.get("date", datetime.now().strftime("%Y-%m-%d"))
-        exp.operator = d.get("operator", "")
-        exp.mouse_id = d.get("mouse_id", "")
-        exp.group = d.get("group", "")
-        exp.paradigm = d.get("paradigm", "")
-        exp.remark = d.get("remark", "")
-        exp.items = [Item.from_dict(it) for it in d.get("items", [])]
-        exp.events = d.get("events", [])
-        exp.started = d.get("started", False)
-        exp.start_time = d.get("start_time", None)
-        return exp
+    def from_dict(cls, d: dict) -> "Subject":
+        subj = cls.__new__(cls)
+        subj.name = d.get("name", "")
+        subj.paradigm = d.get("paradigm", PARADIGM_3SIT)
+        subj.items = [Item.from_dict(it) for it in d.get("items", [])]
+        subj.started = d.get("started", False)
+        subj.start_time = d.get("start_time", None)
+        return subj
+
+    def reset(self):
+        for it in self.items:
+            it.reset()
+        self.started = False
+        self.start_time = None
+
+    def get_value(self, item_name: str) -> float:
+        """Return current elapsed seconds or count for item by name."""
+        for it in self.items:
+            if it.name == item_name:
+                if it.kind == "timer":
+                    return it.current_elapsed()
+                return float(it.count)
+        return 0.0
 
 
-# ---------------------------------------------------------------------------
-# Settings
-# ---------------------------------------------------------------------------
+class Group:
+    """One experimental group (对照组 or 实验组)."""
 
-def load_settings() -> dict:
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            # merge with defaults (so new keys always present)
-            merged = deepcopy(DEFAULT_SETTINGS)
-            for k, v in data.items():
-                if k == "hotkeys" and isinstance(v, dict):
-                    merged["hotkeys"].update(v)
-                else:
-                    merged[k] = v
-            return merged
-        except Exception:
-            pass
-    return deepcopy(DEFAULT_SETTINGS)
+    def __init__(self, name: str):
+        self.name: str = name
+        self.subjects: List[Subject] = []
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "subjects": [s.to_dict() for s in self.subjects],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Group":
+        g = cls(d.get("name", ""))
+        g.subjects = [Subject.from_dict(s) for s in d.get("subjects", [])]
+        return g
 
 
-def save_settings(settings: dict):
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(settings, f, ensure_ascii=False, indent=2)
+class Session:
+    """Top-level data container for one experiment session."""
 
+    def __init__(self, paradigm: str = PARADIGM_3SIT):
+        self.paradigm: str = paradigm
+        self.date: str = datetime.now().strftime("%Y-%m-%d")
+        self.operator: str = ""
+        self.remark: str = ""
+        self.groups: List[Group] = [Group(GROUP_CONTROL), Group(GROUP_EXPERIMENT)]
+        self.events: List[dict] = []
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+    def to_dict(self) -> dict:
+        return {
+            "_version": 2,
+            "paradigm": self.paradigm,
+            "date": self.date,
+            "operator": self.operator,
+            "remark": self.remark,
+            "groups": [g.to_dict() for g in self.groups],
+            "events": self.events,
+        }
 
-def fmt_mmssxx(seconds: float) -> str:
-    """Format seconds -> MM:SS.xx"""
-    if seconds < 0:
-        seconds = 0.0
-    total_cs = int(seconds * 100)
-    cs = total_cs % 100
-    total_s = total_cs // 100
-    s = total_s % 60
-    m = total_s // 60
-    return f"{m:02d}:{s:02d}.{cs:02d}"
+    @classmethod
+    def from_dict(cls, d: dict) -> "Session":
+        sess = cls.__new__(cls)
+        sess.paradigm = d.get("paradigm", PARADIGM_3SIT)
+        sess.date = d.get("date", datetime.now().strftime("%Y-%m-%d"))
+        sess.operator = d.get("operator", "")
+        sess.remark = d.get("remark", "")
+        sess.events = d.get("events", [])
+        groups_data = d.get("groups", [])
+        if groups_data:
+            sess.groups = [Group.from_dict(g) for g in groups_data]
+            existing_names = {g.name for g in sess.groups}
+            for gname in ALL_GROUPS:
+                if gname not in existing_names:
+                    sess.groups.append(Group(gname))
+        else:
+            sess.groups = [Group(GROUP_CONTROL), Group(GROUP_EXPERIMENT)]
+        return sess
 
-
-def safe_name_part(s: str) -> str:
-    """Make a string safe for use as a filename component."""
-    if not s:
-        return ""
-    return "".join(c for c in s if c.isalnum() or c in "-_ ")[:MAX_FILENAME_PART_LENGTH].strip()
-
-
-def load_recent_templates() -> List[dict]:
-    if os.path.exists(RECENT_TEMPLATE_FILE):
-        try:
-            with open(RECENT_TEMPLATE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                return data
-        except Exception:
-            pass
-    return []
-
-
-def save_recent_template(template: dict):
-    recent = load_recent_templates()
-    name = template.get("name", "")
-    # remove duplicate
-    recent = [t for t in recent if t.get("name") != name]
-    recent.insert(0, template)
-    recent = recent[:MAX_RECENT_TEMPLATES]  # keep last N
-    with open(RECENT_TEMPLATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(recent, f, ensure_ascii=False, indent=2)
+    @classmethod
+    def _migrate_from_v1(cls, d: dict) -> "Session":
+        """Load from v1 format (single Experiment with items, no groups)."""
+        sess = cls()
+        paradigm_map = {
+            "三箱社交": PARADIGM_3SIT,
+            "自由社交": PARADIGM_FREESIT,
+            # v1 "都做" combined both paradigms; default to 3-SIT for migration
+            "都做": PARADIGM_3SIT,
+        }
+        sess.paradigm = paradigm_map.get(d.get("paradigm", ""), PARADIGM_3SIT)
+        sess.date = d.get("date", datetime.now().strftime("%Y-%m-%d"))
+        sess.operator = d.get("operator", "")
+        sess.remark = d.get("remark", "")
+        sess.events = d.get("events", [])
+        old_items = d.get("items", [])
+        if old_items:
+            name_map = {
+                "学习小鼠与真鼠社交的时间": "Mice/s",
+                "与玩具社交的时间": "Toy/s",
+                "与玩具鼠的社交时间": "Toy/s",
+            }
+            subj = Subject.__new__(Subject)
+            subj.name = d.get("mouse_id", "") or "Subject1"
+            subj.paradigm = sess.paradigm
+            subj.items = []
+            for it_d in old_items:
+                it = Item.from_dict(it_d)
+                it.name = name_map.get(it.name, it.name)
+                subj.items.append(it)
+            subj.started = d.get("started", False)
+            subj.start_time = d.get("start_time", None)
+            sess.groups[0].subjects.append(subj)
+        return sess
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +390,7 @@ class SettingsDialog(QDialog):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        hotkey_group = QGroupBox("快捷键")
+        hotkey_group = QGroupBox("快捷键（窗口聚焦时生效）")
         form = QFormLayout()
         hotkey_group.setLayout(form)
 
@@ -309,7 +407,6 @@ class SettingsDialog(QDialog):
         form.addRow("开始/暂停:", self._hk_start_stop)
         form.addRow("重置:", self._hk_reset)
         form.addRow("导出:", self._hk_export)
-
         layout.addWidget(hotkey_group)
 
         btn_row = QHBoxLayout()
@@ -345,11 +442,11 @@ class SettingsDialog(QDialog):
 class ItemRowWidget(QWidget):
     """A single row representing one timer or counter item."""
 
-    toggled = Signal(int)   # row index
+    toggled = Signal(int)
     incremented = Signal(int)
     decremented = Signal(int)
     name_changed = Signal(int, str)
-    deleted = Signal(int)   # row index
+    deleted = Signal(int)
 
     def __init__(self, index: int, item: Item, parent=None):
         super().__init__(parent)
@@ -361,7 +458,6 @@ class ItemRowWidget(QWidget):
         row = QHBoxLayout(self)
         row.setContentsMargins(4, 2, 4, 2)
 
-        # Index label (1-based)
         idx_label = QLabel(f"{self._index + 1}.")
         idx_label.setFixedWidth(24)
         idx_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -370,15 +466,13 @@ class ItemRowWidget(QWidget):
         idx_label.setFont(font_idx)
         row.addWidget(idx_label)
 
-        # Name (editable)
         self._name_edit = QLineEdit(self._item.name)
-        self._name_edit.setMinimumWidth(160)
+        self._name_edit.setMinimumWidth(140)
         self._name_edit.textChanged.connect(self._on_name_changed)
         row.addWidget(self._name_edit)
 
-        # Value display
         self._val_label = QLabel()
-        self._val_label.setMinimumWidth(90)
+        self._val_label.setMinimumWidth(80)
         self._val_label.setAlignment(Qt.AlignCenter)
         font = QFont("Courier New", 12)
         font.setBold(True)
@@ -410,7 +504,6 @@ class ItemRowWidget(QWidget):
 
         row.addStretch()
 
-        # Delete button
         btn_del = QPushButton("✕")
         btn_del.setToolTip("删除此项目")
         btn_del.setFixedWidth(30)
@@ -423,7 +516,7 @@ class ItemRowWidget(QWidget):
 
     def _update_val_label(self):
         if self._item.kind == "timer":
-            self._val_label.setText(fmt_mmssxx(self._item.current_elapsed()))
+            self._val_label.setText(fmt_ssxx(self._item.current_elapsed()))
         else:
             self._val_label.setText(str(self._item.count))
 
@@ -437,93 +530,68 @@ class ItemRowWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Main Window
+# Subject Detail Dialog
 # ---------------------------------------------------------------------------
 
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("MiceTimer - 实验计时计数软件")
-        self.setMinimumSize(QSize(800, 600))
+class SubjectDetailDialog(QDialog):
+    """Dialog for timing/counting items for a specific subject."""
 
-        self._settings = load_settings()
-        self._exp = Experiment()
+    def __init__(
+        self,
+        subj: Subject,
+        group_name: str,
+        settings: dict,
+        log_callback,
+        autosave_callback,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._subj = subj
+        self._group_name = group_name
+        self._settings = settings
+        self._log_callback = log_callback
+        self._autosave_callback = autosave_callback
         self._item_row_widgets: List[ItemRowWidget] = []
 
+        self.setWindowTitle(f"{subj.paradigm} — {group_name} — {subj.name}")
+        self.setMinimumSize(640, 480)
+
         self._tick_timer = QTimer(self)
-        self._tick_timer.setInterval(100)  # 100ms refresh
+        self._tick_timer.setInterval(100)
         self._tick_timer.timeout.connect(self._on_tick)
 
         self._build_ui()
-        self._apply_hotkeys()
-
-        # Try to recover autosave
-        self._try_recover()
-
         self._tick_timer.start()
 
-    # ------------------------------------------------------------------
-    # UI construction
-    # ------------------------------------------------------------------
-
     def _build_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(8, 8, 8, 8)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 8)
+        layout.setSpacing(8)
 
-        # Status bar (red when experiment running)
-        self._status_bar = QStatusBar()
-        self.setStatusBar(self._status_bar)
+        title_label = QLabel(
+            f"<span style='font-size:14px;font-weight:bold;'>{self._subj.paradigm}</span>"
+            f" &nbsp;|&nbsp; {self._group_name} &nbsp;|&nbsp; "
+            f"<span style='font-size:14px;font-weight:bold;'>{self._subj.name}</span>"
+        )
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+
         self._status_label = QLabel("就绪")
-        self._status_bar.addWidget(self._status_label)
+        self._status_label.setAlignment(Qt.AlignCenter)
+        self._status_label.setFixedHeight(28)
+        layout.addWidget(self._status_label)
 
-        # Tab widget
-        tabs = QTabWidget()
-        main_layout.addWidget(tabs)
-
-        # --- Tab: Experiment ---
-        exp_tab = QWidget()
-        exp_layout = QVBoxLayout(exp_tab)
-        tabs.addTab(exp_tab, "实验")
-
-        # Info area
-        info_group = QGroupBox("实验信息")
-        info_form = QFormLayout()
-        info_group.setLayout(info_form)
-
-        self._field_date = QLineEdit(self._exp.date)
-        self._field_operator = QLineEdit(self._exp.operator)
-        self._field_mouse_id = QLineEdit(self._exp.mouse_id)
-        self._field_group = QLineEdit(self._exp.group)
-        self._field_paradigm = QLineEdit(self._exp.paradigm)
-        self._field_remark = QLineEdit(self._exp.remark)
-
-        info_form.addRow("日期:", self._field_date)
-        info_form.addRow("实验员:", self._field_operator)
-        info_form.addRow("实验鼠ID:", self._field_mouse_id)
-        info_form.addRow("组别:", self._field_group)
-        info_form.addRow("范式/实验类型:", self._field_paradigm)
-        info_form.addRow("备注:", self._field_remark)
-        exp_layout.addWidget(info_group)
-
-        # Items scroll area
-        items_group = QGroupBox("计时/计数项目")
-        items_outer = QVBoxLayout()
-        items_group.setLayout(items_outer)
-
-        self._items_container = QWidget()
-        self._items_layout = QVBoxLayout(self._items_container)
+        items_container = QWidget()
+        self._items_layout = QVBoxLayout(items_container)
         self._items_layout.setContentsMargins(0, 0, 0, 0)
-        self._items_layout.setSpacing(2)
+        self._items_layout.setSpacing(4)
 
         scroll = QScrollArea()
-        scroll.setWidget(self._items_container)
+        scroll.setWidget(items_container)
         scroll.setWidgetResizable(True)
         scroll.setMinimumHeight(180)
-        items_outer.addWidget(scroll)
+        layout.addWidget(scroll)
 
-        # Item management buttons
         item_btn_row = QHBoxLayout()
         btn_add_timer = QPushButton("+ 计时项")
         btn_add_counter = QPushButton("+ 计数项")
@@ -532,139 +600,43 @@ class MainWindow(QMainWindow):
         item_btn_row.addWidget(btn_add_timer)
         item_btn_row.addWidget(btn_add_counter)
         item_btn_row.addStretch()
-        items_outer.addLayout(item_btn_row)
+        layout.addLayout(item_btn_row)
 
-        exp_layout.addWidget(items_group)
-
-        # Control buttons
         ctrl_row = QHBoxLayout()
+        btn_back = QPushButton("← 返回汇总表")
+        btn_back.setFixedHeight(36)
+        btn_back.clicked.connect(self.accept)
+
         self._btn_start_stop = QPushButton("开始实验 (F5)")
-        self._btn_start_stop.setFixedHeight(40)
+        self._btn_start_stop.setFixedHeight(36)
         self._btn_start_stop.clicked.connect(self._on_start_stop)
 
-        self._btn_reset = QPushButton("重置 (F6)")
-        self._btn_reset.setFixedHeight(40)
-        self._btn_reset.clicked.connect(self._on_reset)
+        btn_reset = QPushButton("重置 (F6)")
+        btn_reset.setFixedHeight(36)
+        btn_reset.clicked.connect(self._on_reset)
 
+        ctrl_row.addWidget(btn_back)
+        ctrl_row.addStretch()
         ctrl_row.addWidget(self._btn_start_stop)
-        ctrl_row.addWidget(self._btn_reset)
-        exp_layout.addLayout(ctrl_row)
+        ctrl_row.addWidget(btn_reset)
+        layout.addLayout(ctrl_row)
 
-        # Export buttons
-        export_row = QHBoxLayout()
-        self._btn_export_default = QPushButton("导出到默认目录 (F7)")
-        self._btn_export_default.clicked.connect(self.export_excel_default)
+        hint = QLabel("快捷键: 数字键 1~9 控制对应项目计时/计数；F5 开始/暂停；F6 重置")
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+        hint.setAlignment(Qt.AlignCenter)
+        layout.addWidget(hint)
 
-        self._btn_export_as = QPushButton("另存为...")
-        self._btn_export_as.clicked.connect(self.export_excel_as)
-
-        export_row.addWidget(self._btn_export_default)
-        export_row.addWidget(self._btn_export_as)
-        exp_layout.addLayout(export_row)
-
-        # --- Tab: Templates ---
-        tpl_tab = QWidget()
-        tpl_layout = QVBoxLayout(tpl_tab)
-        tabs.addTab(tpl_tab, "模板")
-
-        tpl_btn_row = QHBoxLayout()
-        btn_load_default = QPushButton("加载默认范式")
-        btn_save_tpl = QPushButton("保存为模板...")
-        btn_load_tpl = QPushButton("加载模板...")
-        btn_load_default.clicked.connect(self._load_default_paradigm_dialog)
-        btn_save_tpl.clicked.connect(self._save_template)
-        btn_load_tpl.clicked.connect(self._load_template_dialog)
-        tpl_btn_row.addWidget(btn_load_default)
-        tpl_btn_row.addWidget(btn_save_tpl)
-        tpl_btn_row.addWidget(btn_load_tpl)
-        tpl_layout.addLayout(tpl_btn_row)
-
-        recent_group = QGroupBox("最近模板（快速加载）")
-        recent_layout = QVBoxLayout()
-        recent_group.setLayout(recent_layout)
-        self._recent_list_widget = QTableWidget()
-        self._recent_list_widget.setColumnCount(2)
-        self._recent_list_widget.setHorizontalHeaderLabels(["模板名", "项目数"])
-        self._recent_list_widget.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self._recent_list_widget.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._recent_list_widget.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._recent_list_widget.setMinimumHeight(140)
-        recent_layout.addWidget(self._recent_list_widget)
-
-        btn_load_recent = QPushButton("加载选中模板")
-        btn_load_recent.clicked.connect(self._load_recent_selected)
-        recent_layout.addWidget(btn_load_recent)
-        tpl_layout.addWidget(recent_group)
-        tpl_layout.addStretch()
-        self._refresh_recent_list()
-
-        # --- Tab: Event Log ---
-        log_tab = QWidget()
-        log_layout = QVBoxLayout(log_tab)
-        tabs.addTab(log_tab, "事件日志")
-
-        self._log_text = QTextEdit()
-        self._log_text.setReadOnly(True)
-        log_layout.addWidget(self._log_text)
-
-        btn_clear_log = QPushButton("清空日志")
-        btn_clear_log.clicked.connect(self._clear_log)
-        log_layout.addWidget(btn_clear_log)
-
-        # --- Tab: Settings ---
-        settings_tab = QWidget()
-        settings_layout = QVBoxLayout(settings_tab)
-        tabs.addTab(settings_tab, "设置")
-
-        btn_open_settings = QPushButton("打开快捷键设置...")
-        btn_open_settings.clicked.connect(self._open_settings_dialog)
-        settings_layout.addWidget(btn_open_settings)
-
-        hk_info = QLabel(
-            "当前快捷键：\n"
-            + self._hotkey_summary()
-        )
-        hk_info.setObjectName("hk_info_label")
-        settings_layout.addWidget(hk_info)
-        self._hk_info_label = hk_info
-
-        settings_layout.addStretch()
-
-        # Load experiment fields to experiment
-        self._connect_info_fields()
-
-        # Build item rows from current exp
         self._rebuild_item_rows()
-
-    def _hotkey_summary(self) -> str:
-        hk = self._settings["hotkeys"]
-        return (
-            f"  开始/暂停: {hk.get('start_stop', 'F5')}\n"
-            f"  重置: {hk.get('reset', 'F6')}\n"
-            f"  导出: {hk.get('export', 'F7')}"
-        )
-
-    def _connect_info_fields(self):
-        self._field_date.textChanged.connect(lambda v: setattr(self._exp, "date", v))
-        self._field_operator.textChanged.connect(lambda v: setattr(self._exp, "operator", v))
-        self._field_mouse_id.textChanged.connect(lambda v: setattr(self._exp, "mouse_id", v))
-        self._field_group.textChanged.connect(lambda v: setattr(self._exp, "group", v))
-        self._field_paradigm.textChanged.connect(lambda v: setattr(self._exp, "paradigm", v))
-        self._field_remark.textChanged.connect(lambda v: setattr(self._exp, "remark", v))
-
-    # ------------------------------------------------------------------
-    # Item rows
-    # ------------------------------------------------------------------
+        self._update_status()
 
     def _rebuild_item_rows(self):
-        # Clear existing
         while self._items_layout.count():
             child = self._items_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
         self._item_row_widgets.clear()
 
-        for i, item in enumerate(self._exp.items):
+        for i, item in enumerate(self._subj.items):
             w = ItemRowWidget(i, item)
             w.toggled.connect(self._toggle_timer)
             w.incremented.connect(self._increment_counter)
@@ -678,33 +650,130 @@ class MainWindow(QMainWindow):
 
     def _add_item(self, kind: str):
         name = "新计时项" if kind == "timer" else "新计数项"
-        item = Item(kind, name)
-        self._exp.items.append(item)
+        self._subj.items.append(Item(kind, name))
         self._rebuild_item_rows()
-        self.save_autosave()
+        self._autosave_callback()
 
     def _delete_item(self, index: int):
-        if index < 0 or index >= len(self._exp.items):
+        if 0 <= index < len(self._subj.items):
+            self._subj.items.pop(index)
+            self._rebuild_item_rows()
+            self._autosave_callback()
+
+    def _on_tick(self):
+        for w in self._item_row_widgets:
+            w.refresh()
+
+    def _update_status(self):
+        if self._subj.started:
+            self._status_label.setText("⚠ 实验进行中")
+            self._status_label.setStyleSheet(
+                "background-color: #cc0000; color: white; font-weight: bold;"
+            )
+            self._btn_start_stop.setText("暂停实验 (F5)")
+        else:
+            self._status_label.setText("就绪")
+            self._status_label.setStyleSheet(
+                "background-color: #e8e8e8; color: #555;"
+            )
+            self._btn_start_stop.setText("开始实验 (F5)")
+
+    def _on_start_stop(self):
+        if not self._subj.started:
+            self._subj.started = True
+            self._subj.start_time = datetime.now().isoformat()
+            self._log_callback(
+                "experiment_start",
+                detail=f"{self._group_name}/{self._subj.name}",
+            )
+        else:
+            any_running = any(
+                it.running for it in self._subj.items if it.kind == "timer"
+            )
+            if any_running:
+                for it in self._subj.items:
+                    if it.kind == "timer" and it.running:
+                        it.elapsed += time.perf_counter() - (
+                            it.last_start_ts or time.perf_counter()
+                        )
+                        it.running = False
+                        it.last_start_ts = None
+                self._log_callback(
+                    "pause_all", detail=f"{self._group_name}/{self._subj.name}"
+                )
+            else:
+                self._log_callback(
+                    "resume_all", detail=f"{self._group_name}/{self._subj.name}"
+                )
+        self._update_status()
+        self._autosave_callback()
+
+    def _on_reset(self):
+        reply = QMessageBox.question(
+            self,
+            "确认重置",
+            f"确认重置 [{self._subj.name}] 的所有计时/计数数据？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
             return
-        self._exp.items.pop(index)
+        self._subj.reset()
         self._rebuild_item_rows()
-        self.save_autosave()
+        self._update_status()
+        self._log_callback("reset_all", detail=f"{self._group_name}/{self._subj.name}")
+        self._autosave_callback()
 
-    def _remove_last_item(self):
-        if not self._exp.items:
+    def _toggle_timer(self, index: int):
+        if index >= len(self._subj.items):
             return
-        self._exp.items.pop()
-        self._rebuild_item_rows()
-        self.save_autosave()
+        item = self._subj.items[index]
+        if item.kind != "timer":
+            return
+        if not self._subj.started:
+            QMessageBox.information(self, "提示", '请先点击"开始实验"。')
+            return
+        now = time.perf_counter()
+        if item.running:
+            item.elapsed += now - (item.last_start_ts or now)
+            item.running = False
+            item.last_start_ts = None
+            self._log_callback("timer_stop", item_name=item.name)
+        else:
+            item.running = True
+            item.last_start_ts = now
+            self._log_callback("timer_start", item_name=item.name)
+        self._autosave_callback()
 
-    # ------------------------------------------------------------------
-    # Hotkeys
-    # ------------------------------------------------------------------
+    def _increment_counter(self, index: int):
+        if index >= len(self._subj.items):
+            return
+        item = self._subj.items[index]
+        if not self._subj.started:
+            QMessageBox.information(self, "提示", '请先点击"开始实验"。')
+            return
+        item.count += 1
+        self._log_callback("counter_inc", item_name=item.name, detail=str(item.count))
+        self._autosave_callback()
 
-    def _apply_hotkeys(self):
-        pass  # hotkeys are handled via keyPressEvent (window-focused only)
+    def _decrement_counter(self, index: int):
+        if index >= len(self._subj.items):
+            return
+        item = self._subj.items[index]
+        if item.count > 0:
+            item.count -= 1
+        self._log_callback("counter_dec", item_name=item.name, detail=str(item.count))
+        self._autosave_callback()
+
+    def _on_item_name_changed(self, index: int, name: str):
+        if index < len(self._subj.items):
+            self._subj.items[index].name = name
 
     def keyPressEvent(self, event):
+        focused = QApplication.focusWidget()
+        if isinstance(focused, (QLineEdit, QTextEdit, QKeySequenceEdit)):
+            super().keyPressEvent(event)
+            return
+
         hk = self._settings["hotkeys"]
 
         def _matches(key_str: str) -> bool:
@@ -713,15 +782,7 @@ class MainWindow(QMainWindow):
             qs = QKeySequence(key_str)
             if qs.isEmpty():
                 return False
-            # Compare first key of sequence
-            key_combo = qs[0]
-            return event.keyCombination() == key_combo
-
-        # Don't intercept if a text-editing widget has focus
-        focused = QApplication.focusWidget()
-        if isinstance(focused, (QLineEdit, QTextEdit, QKeySequenceEdit)):
-            super().keyPressEvent(event)
-            return
+            return event.keyCombination() == qs[0]
 
         if _matches(hk.get("start_stop", "F5")):
             self._on_start_stop()
@@ -731,23 +792,12 @@ class MainWindow(QMainWindow):
             self._on_reset()
             event.accept()
             return
-        if _matches(hk.get("export", "F7")):
-            self.export_excel_default()
-            event.accept()
-            return
 
-        # Delete key: delete the last item
-        if event.key() == Qt.Key_Delete:
-            self._remove_last_item()
-            event.accept()
-            return
-
-        # Digit keys 1-9: toggle timer or increment counter for that item
         key = event.key()
         if Qt.Key_1 <= key <= Qt.Key_9:
-            idx = key - Qt.Key_1  # 0-based index
-            if idx < len(self._exp.items):
-                item = self._exp.items[idx]
+            idx = key - Qt.Key_1
+            if idx < len(self._subj.items):
+                item = self._subj.items[idx]
                 if item.kind == "timer":
                     self._toggle_timer(idx)
                 else:
@@ -757,123 +807,483 @@ class MainWindow(QMainWindow):
 
         super().keyPressEvent(event)
 
-    # ------------------------------------------------------------------
-    # Experiment control
-    # ------------------------------------------------------------------
+    def closeEvent(self, event):
+        self._tick_timer.stop()
+        super().closeEvent(event)
 
-    def _on_start_stop(self):
-        if not self._exp.started:
-            # Start experiment
-            self._exp.started = True
-            self._exp.start_time = datetime.now().isoformat()
-            self._log_event("experiment_start")
-            self._update_status_bar()
-            self._btn_start_stop.setText("暂停实验 (F5)")
+
+# ---------------------------------------------------------------------------
+# Summary table widget
+# ---------------------------------------------------------------------------
+
+class SummaryTableWidget(QWidget):
+    """
+    A single QTableWidget showing all groups and their subjects for the
+    current paradigm.  Group header rows span all value columns.
+    """
+
+    def __init__(
+        self,
+        session: Session,
+        settings_ref: dict,
+        log_callback,
+        autosave_callback,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._session = session
+        self._settings_ref = settings_ref
+        self._log_callback = log_callback
+        self._autosave_callback = autosave_callback
+        self._subject_rows: List[tuple] = []
+        self._build_ui()
+        self._rebuild()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self._table = QTableWidget()
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(True)
+        layout.addWidget(self._table)
+
+    def _col_headers(self) -> List[str]:
+        if self._session.paradigm == PARADIGM_3SIT:
+            return ["对象名", "Mice/s", "Toy/s", "Mice-Toy/s", "Mice+Toy/s", "DI", "操作"]
+        return ["对象名", "适应时间/s", "嗅探时间/s", "躲避次数", "操作"]
+
+    def _rebuild(self):
+        self._subject_rows = []
+        headers = self._col_headers()
+        ncols = len(headers)
+
+        self._table.clearContents()
+        self._table.setColumnCount(ncols)
+        self._table.setHorizontalHeaderLabels(headers)
+
+        hh = self._table.horizontalHeader()
+        for i in range(ncols - 1):
+            hh.setSectionResizeMode(i, QHeaderView.Stretch)
+        hh.setSectionResizeMode(ncols - 1, QHeaderView.Fixed)
+        self._table.setColumnWidth(ncols - 1, 130)
+
+        total_rows = sum(
+            1 + len(g.subjects)
+            for g in self._session.groups
+        )
+        self._table.setRowCount(total_rows)
+
+        current_row = 0
+        for g_idx, group in enumerate(self._session.groups):
+            # Group header row
+            self._table.setSpan(current_row, 0, 1, ncols - 1)
+            header_item = QTableWidgetItem(f"  {group.name}")
+            header_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            bg_color = QColor("#4a6741") if g_idx == 0 else QColor("#3a5978")
+            header_item.setBackground(bg_color)
+            header_item.setForeground(QColor("white"))
+            hdr_font = QFont()
+            hdr_font.setBold(True)
+            hdr_font.setPointSize(10)
+            header_item.setFont(hdr_font)
+            self._table.setItem(current_row, 0, header_item)
+            self._table.setRowHeight(current_row, 34)
+
+            btn_add = QPushButton("+ 添加对象")
+            btn_add.setStyleSheet(
+                "color: white; background-color: #5a8050; "
+                "border-radius: 3px; padding: 2px 6px;"
+            )
+            btn_add.clicked.connect(
+                lambda _, gi=g_idx: self._add_subject(gi)
+            )
+            self._table.setCellWidget(current_row, ncols - 1, btn_add)
+            current_row += 1
+
+            for s_idx, subj in enumerate(group.subjects):
+                self._subject_rows.append((current_row, g_idx, s_idx))
+                self._fill_subject_row(current_row, g_idx, s_idx, ncols)
+                self._table.setRowHeight(current_row, 30)
+                current_row += 1
+
+    def _fill_subject_row(self, row: int, g_idx: int, s_idx: int, ncols: int):
+        subj = self._session.groups[g_idx].subjects[s_idx]
+
+        self._table.setItem(row, 0, QTableWidgetItem(subj.name))
+
+        if self._session.paradigm == PARADIGM_3SIT:
+            mice = subj.get_value("Mice/s")
+            toy = subj.get_value("Toy/s")
+            mice_toy = mice - toy
+
+            self._table.setItem(row, 1, QTableWidgetItem(fmt_ssxx(mice)))
+            self._table.setItem(row, 2, QTableWidgetItem(fmt_ssxx(toy)))
+            self._table.setItem(row, 3, QTableWidgetItem(fmt_ssxx_signed(mice_toy)))
+            self._table.setItem(row, 4, QTableWidgetItem(fmt_ssxx(mice + toy)))
+            self._table.setItem(row, 5, QTableWidgetItem(calc_di(mice, toy)))
         else:
-            # Toggle: pause all running timers
-            any_running = any(it.running for it in self._exp.items if it.kind == "timer")
-            if any_running:
-                for it in self._exp.items:
-                    if it.kind == "timer" and it.running:
-                        it.elapsed += time.perf_counter() - (it.last_start_ts or time.perf_counter())
-                        it.running = False
-                        it.last_start_ts = None
-                self._log_event("pause_all")
-                self._btn_start_stop.setText("继续实验 (F5)")
-            else:
-                self._btn_start_stop.setText("暂停实验 (F5)")
-                self._log_event("resume_all")
+            adapt = subj.get_value("适应时间/s")
+            sniff = subj.get_value("嗅探时间/s")
+            avoid = subj.get_value("躲避次数")
 
-        self.save_autosave()
+            self._table.setItem(row, 1, QTableWidgetItem(fmt_ssxx(adapt)))
+            self._table.setItem(row, 2, QTableWidgetItem(fmt_ssxx(sniff)))
+            self._table.setItem(row, 3, QTableWidgetItem(str(int(avoid))))
 
-    def _on_reset(self):
+        op_w = self._make_op_widget(g_idx, s_idx)
+        self._table.setCellWidget(row, ncols - 1, op_w)
+
+    def _make_op_widget(self, g_idx: int, s_idx: int) -> QWidget:
+        w = QWidget()
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(3, 2, 3, 2)
+        lay.setSpacing(4)
+
+        btn_detail = QPushButton("详情")
+        btn_detail.setFixedHeight(24)
+        btn_del = QPushButton("删除")
+        btn_del.setFixedHeight(24)
+        btn_del.setStyleSheet("color: #cc0000;")
+
+        btn_detail.clicked.connect(
+            lambda _, gi=g_idx, si=s_idx: self._open_detail(gi, si)
+        )
+        btn_del.clicked.connect(
+            lambda _, gi=g_idx, si=s_idx: self._delete_subject(gi, si)
+        )
+
+        lay.addWidget(btn_detail)
+        lay.addWidget(btn_del)
+        return w
+
+    def _add_subject(self, g_idx: int):
+        group = self._session.groups[g_idx]
+        name, ok = QInputDialog.getText(
+            self, f"添加实验对象 — {group.name}", "对象名称（例如 B21）:"
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if any(s.name == name for s in group.subjects):
+            QMessageBox.warning(
+                self, "重名", f"实验对象 [{name}] 已存在于 {group.name} 中。"
+            )
+            return
+        group.subjects.append(Subject(name, self._session.paradigm))
+        self._rebuild()
+        self._autosave_callback()
+
+    def _delete_subject(self, g_idx: int, s_idx: int):
+        group = self._session.groups[g_idx]
+        if s_idx >= len(group.subjects):
+            return
+        subj = group.subjects[s_idx]
         reply = QMessageBox.question(
             self,
-            "确认重置",
-            "确认重置所有计时/计数项目？",
+            "确认删除",
+            f"确认删除实验对象 [{subj.name}]？\n该对象的所有计时/计数数据将被清除，且无法恢复。",
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
-        self._exp.started = False
-        self._exp.start_time = None
-        for it in self._exp.items:
-            it.reset()
-        self._btn_start_stop.setText("开始实验 (F5)")
-        self._update_status_bar()
-        self._log_event("reset_all")
-        self._rebuild_item_rows()
-        self.save_autosave()
+        group.subjects.pop(s_idx)
+        self._rebuild()
+        self._autosave_callback()
 
-    def _toggle_timer(self, index: int):
-        if index >= len(self._exp.items):
+    def _open_detail(self, g_idx: int, s_idx: int):
+        group = self._session.groups[g_idx]
+        if s_idx >= len(group.subjects):
             return
-        item = self._exp.items[index]
-        if item.kind != "timer":
-            return
+        subj = group.subjects[s_idx]
+        dlg = SubjectDetailDialog(
+            subj=subj,
+            group_name=group.name,
+            settings=self._settings_ref,
+            log_callback=self._log_callback,
+            autosave_callback=self._autosave_callback,
+            parent=self,
+        )
+        dlg.exec()
+        self.refresh()
 
-        if not self._exp.started:
-            QMessageBox.information(self, "提示", '请先点击"开始实验"。')
-            return
+    def refresh(self):
+        """Update only value cells without rebuilding the table structure."""
+        for table_row, g_idx, s_idx in self._subject_rows:
+            subj = self._session.groups[g_idx].subjects[s_idx]
+            if self._session.paradigm == PARADIGM_3SIT:
+                mice = subj.get_value("Mice/s")
+                toy = subj.get_value("Toy/s")
+                mice_toy = mice - toy
 
-        now = time.perf_counter()
-        if item.running:
-            item.elapsed += now - (item.last_start_ts or now)
-            item.running = False
-            item.last_start_ts = None
-            self._log_event("timer_stop", item_name=item.name)
-        else:
-            item.running = True
-            item.last_start_ts = now
-            self._log_event("timer_start", item_name=item.name)
+                for col, txt in enumerate(
+                    [
+                        fmt_ssxx(mice),
+                        fmt_ssxx(toy),
+                        fmt_ssxx_signed(mice_toy),
+                        fmt_ssxx(mice + toy),
+                        calc_di(mice, toy),
+                    ],
+                    start=1,
+                ):
+                    item = self._table.item(table_row, col)
+                    if item:
+                        item.setText(txt)
+            else:
+                adapt = subj.get_value("适应时间/s")
+                sniff = subj.get_value("嗅探时间/s")
+                avoid = subj.get_value("躲避次数")
+                for col, txt in enumerate(
+                    [fmt_ssxx(adapt), fmt_ssxx(sniff), str(int(avoid))],
+                    start=1,
+                ):
+                    item = self._table.item(table_row, col)
+                    if item:
+                        item.setText(txt)
 
-        self.save_autosave()
 
-    def _increment_counter(self, index: int):
-        if index >= len(self._exp.items):
-            return
-        item = self._exp.items[index]
-        if not self._exp.started:
-            QMessageBox.information(self, "提示", '请先点击"开始实验"。')
-            return
-        item.count += 1
-        self._log_event("counter_inc", item_name=item.name, detail=str(item.count))
-        self.save_autosave()
+# ---------------------------------------------------------------------------
+# Main Window
+# ---------------------------------------------------------------------------
 
-    def _decrement_counter(self, index: int):
-        if index >= len(self._exp.items):
-            return
-        item = self._exp.items[index]
-        if item.count > 0:
-            item.count -= 1
-        self._log_event("counter_dec", item_name=item.name, detail=str(item.count))
-        self.save_autosave()
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("MiceTimer v2.0 - 实验计时计数软件")
+        self.setMinimumSize(QSize(900, 620))
 
-    def _on_item_name_changed(self, index: int, name: str):
-        if index < len(self._exp.items):
-            self._exp.items[index].name = name
+        self._settings = load_settings()
+        self._session = Session()
+        self._summary_widget: Optional[SummaryTableWidget] = None
+
+        self._tick_timer = QTimer(self)
+        self._tick_timer.setInterval(100)
+        self._tick_timer.timeout.connect(self._on_tick)
+
+        self._build_ui()
+        self._try_recover()
+        self._tick_timer.start()
 
     # ------------------------------------------------------------------
-    # Status bar
+    # UI construction
     # ------------------------------------------------------------------
 
-    def _update_status_bar(self):
-        if self._exp.started:
-            self._status_label.setText("⚠ 实验进行中")
-            self._status_bar.setStyleSheet(
-                "QStatusBar { background-color: #cc0000; color: white; font-weight: bold; }"
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+
+        self._status_bar = QStatusBar()
+        self.setStatusBar(self._status_bar)
+        self._status_label = QLabel("就绪")
+        self._status_bar.addWidget(self._status_label)
+
+        tabs = QTabWidget()
+        self._tabs = tabs
+        main_layout.addWidget(tabs)
+
+        # --- Tab: 汇总 ---
+        summary_tab = QWidget()
+        summary_layout = QVBoxLayout(summary_tab)
+        summary_layout.setContentsMargins(8, 8, 8, 8)
+        tabs.addTab(summary_tab, "汇总")
+
+        info_row = QHBoxLayout()
+        info_row.addWidget(QLabel("范式:"))
+        self._paradigm_combo = QComboBox()
+        self._paradigm_combo.addItems(ALL_PARADIGMS)
+        self._paradigm_combo.setFixedWidth(110)
+        self._paradigm_combo.currentTextChanged.connect(self._on_paradigm_changed)
+        info_row.addWidget(self._paradigm_combo)
+
+        info_row.addSpacing(16)
+        info_row.addWidget(QLabel("日期:"))
+        self._field_date = QLineEdit()
+        self._field_date.setFixedWidth(100)
+        self._field_date.textChanged.connect(lambda v: setattr(self._session, "date", v))
+        info_row.addWidget(self._field_date)
+
+        info_row.addSpacing(8)
+        info_row.addWidget(QLabel("实验员:"))
+        self._field_operator = QLineEdit()
+        self._field_operator.setFixedWidth(100)
+        self._field_operator.textChanged.connect(
+            lambda v: setattr(self._session, "operator", v)
+        )
+        info_row.addWidget(self._field_operator)
+
+        info_row.addSpacing(8)
+        info_row.addWidget(QLabel("备注:"))
+        self._field_remark = QLineEdit()
+        self._field_remark.setMinimumWidth(120)
+        self._field_remark.textChanged.connect(
+            lambda v: setattr(self._session, "remark", v)
+        )
+        info_row.addWidget(self._field_remark)
+        info_row.addStretch()
+        summary_layout.addLayout(info_row)
+
+        self._summary_scroll = QScrollArea()
+        self._summary_scroll.setWidgetResizable(True)
+        summary_layout.addWidget(self._summary_scroll, stretch=1)
+
+        export_row = QHBoxLayout()
+        hk = self._settings["hotkeys"]
+        self._btn_export_default = QPushButton(
+            f"导出到默认目录 ({hk.get('export', 'F7')})"
+        )
+        self._btn_export_default.clicked.connect(self.export_excel_default)
+        self._btn_export_as = QPushButton("另存为...")
+        self._btn_export_as.clicked.connect(self.export_excel_as)
+        export_row.addWidget(self._btn_export_default)
+        export_row.addWidget(self._btn_export_as)
+        export_row.addStretch()
+        summary_layout.addLayout(export_row)
+
+        # --- Tab: 模板 ---
+        tpl_tab = QWidget()
+        tpl_layout = QVBoxLayout(tpl_tab)
+        tabs.addTab(tpl_tab, "模板")
+
+        tpl_btn_row = QHBoxLayout()
+        btn_save_tpl = QPushButton("保存当前会话为模板...")
+        btn_load_tpl = QPushButton("加载模板文件...")
+        btn_save_tpl.clicked.connect(self._save_template)
+        btn_load_tpl.clicked.connect(self._load_template_dialog)
+        tpl_btn_row.addWidget(btn_save_tpl)
+        tpl_btn_row.addWidget(btn_load_tpl)
+        tpl_btn_row.addStretch()
+        tpl_layout.addLayout(tpl_btn_row)
+
+        recent_group = QGroupBox("最近模板（快速加载）")
+        recent_layout = QVBoxLayout()
+        recent_group.setLayout(recent_layout)
+        self._recent_list_widget = QTableWidget()
+        self._recent_list_widget.setColumnCount(3)
+        self._recent_list_widget.setHorizontalHeaderLabels(["模板名", "范式", "对象数"])
+        self._recent_list_widget.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        self._recent_list_widget.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._recent_list_widget.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._recent_list_widget.setMinimumHeight(140)
+        recent_layout.addWidget(self._recent_list_widget)
+
+        btn_load_recent = QPushButton("加载选中模板")
+        btn_load_recent.clicked.connect(self._load_recent_selected)
+        recent_layout.addWidget(btn_load_recent)
+        tpl_layout.addWidget(recent_group)
+        tpl_layout.addStretch()
+        self._refresh_recent_list()
+
+        # --- Tab: 事件日志 ---
+        log_tab = QWidget()
+        log_layout = QVBoxLayout(log_tab)
+        tabs.addTab(log_tab, "事件日志")
+
+        self._log_text = QTextEdit()
+        self._log_text.setReadOnly(True)
+        log_layout.addWidget(self._log_text)
+
+        btn_clear_log = QPushButton("清空日志")
+        btn_clear_log.clicked.connect(self._clear_log)
+        log_layout.addWidget(btn_clear_log)
+
+        # --- Tab: 设置 ---
+        settings_tab = QWidget()
+        settings_layout = QVBoxLayout(settings_tab)
+        tabs.addTab(settings_tab, "设置")
+
+        btn_open_settings = QPushButton("打开快捷键设置...")
+        btn_open_settings.clicked.connect(self._open_settings_dialog)
+        settings_layout.addWidget(btn_open_settings)
+
+        self._hk_info_label = QLabel("当前快捷键：\n" + self._hotkey_summary())
+        settings_layout.addWidget(self._hk_info_label)
+        settings_layout.addStretch()
+
+    def _build_summary_widget(self):
+        w = SummaryTableWidget(
+            session=self._session,
+            settings_ref=self._settings,
+            log_callback=self._log_event,
+            autosave_callback=self.save_autosave,
+        )
+        self._summary_scroll.setWidget(w)
+        self._summary_widget = w
+
+    # ------------------------------------------------------------------
+    # Paradigm selector
+    # ------------------------------------------------------------------
+
+    def _on_paradigm_changed(self, new_paradigm: str):
+        if new_paradigm == self._session.paradigm:
+            return
+        has_subjects = any(len(g.subjects) > 0 for g in self._session.groups)
+        if has_subjects:
+            reply = QMessageBox.question(
+                self,
+                "切换范式",
+                f"切换到 [{new_paradigm}] 将清除所有实验对象及其数据。\n确认继续？",
+                QMessageBox.Yes | QMessageBox.No,
             )
-        else:
-            self._status_label.setText("就绪")
-            self._status_bar.setStyleSheet("")
+            if reply != QMessageBox.Yes:
+                self._paradigm_combo.blockSignals(True)
+                self._paradigm_combo.setCurrentText(self._session.paradigm)
+                self._paradigm_combo.blockSignals(False)
+                return
+
+        self._session.paradigm = new_paradigm
+        for group in self._session.groups:
+            group.subjects.clear()
+        self._build_summary_widget()
+        self.save_autosave()
+
+    # ------------------------------------------------------------------
+    # Hotkeys
+    # ------------------------------------------------------------------
+
+    def _hotkey_summary(self) -> str:
+        hk = self._settings["hotkeys"]
+        return (
+            f"  开始/暂停: {hk.get('start_stop', 'F5')}\n"
+            f"  重置: {hk.get('reset', 'F6')}\n"
+            f"  导出: {hk.get('export', 'F7')}"
+        )
+
+    def keyPressEvent(self, event):
+        focused = QApplication.focusWidget()
+        if isinstance(focused, (QLineEdit, QTextEdit, QKeySequenceEdit)):
+            super().keyPressEvent(event)
+            return
+
+        hk = self._settings["hotkeys"]
+
+        def _matches(key_str: str) -> bool:
+            if not key_str:
+                return False
+            qs = QKeySequence(key_str)
+            if qs.isEmpty():
+                return False
+            return event.keyCombination() == qs[0]
+
+        if _matches(hk.get("export", "F7")):
+            self.export_excel_default()
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
     # Tick (UI refresh)
     # ------------------------------------------------------------------
 
     def _on_tick(self):
-        for w in self._item_row_widgets:
-            w.refresh()
+        if self._summary_widget:
+            self._summary_widget.refresh()
 
     # ------------------------------------------------------------------
     # Autosave / Recovery
@@ -881,7 +1291,7 @@ class MainWindow(QMainWindow):
 
     def save_autosave(self):
         try:
-            data = self._exp.to_dict()
+            data = self._session.to_dict()
             with open(RECOVERY_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -889,37 +1299,47 @@ class MainWindow(QMainWindow):
 
     def _try_recover(self):
         if not os.path.exists(RECOVERY_FILE):
-            # Load first default paradigm
-            self._apply_paradigm(DEFAULT_PARADIGMS[0])
+            self._apply_session(Session())
             return
         try:
             with open(RECOVERY_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if data.get("_version", 1) >= 2:
+                sess = Session.from_dict(data)
+            else:
+                sess = Session._migrate_from_v1(data)
+
             reply = QMessageBox.question(
                 self,
-                "恢复上次实验",
-                "检测到上次未保存的实验数据，是否恢复？",
+                "恢复上次会话",
+                "检测到上次未保存的会话数据，是否恢复？",
                 QMessageBox.Yes | QMessageBox.No,
             )
             if reply == QMessageBox.Yes:
-                self._exp = Experiment.from_dict(data)
-                self._sync_exp_to_fields()
-                self._rebuild_item_rows()
-                self._update_status_bar()
-                if self._exp.started:
-                    self._btn_start_stop.setText("暂停实验 (F5)")
+                self._apply_session(sess)
             else:
-                self._apply_paradigm(DEFAULT_PARADIGMS[0])
+                self._apply_session(Session())
         except Exception:
-            self._apply_paradigm(DEFAULT_PARADIGMS[0])
+            self._apply_session(Session())
 
-    def _sync_exp_to_fields(self):
-        self._field_date.setText(self._exp.date)
-        self._field_operator.setText(self._exp.operator)
-        self._field_mouse_id.setText(self._exp.mouse_id)
-        self._field_group.setText(self._exp.group)
-        self._field_paradigm.setText(self._exp.paradigm)
-        self._field_remark.setText(self._exp.remark)
+    def _apply_session(self, sess: Session):
+        self._session = sess
+        self._sync_fields()
+        self._build_summary_widget()
+
+    def _sync_fields(self):
+        for field, attr in [
+            (self._field_date, "date"),
+            (self._field_operator, "operator"),
+            (self._field_remark, "remark"),
+        ]:
+            field.blockSignals(True)
+            field.setText(getattr(self._session, attr))
+            field.blockSignals(False)
+
+        self._paradigm_combo.blockSignals(True)
+        self._paradigm_combo.setCurrentText(self._session.paradigm)
+        self._paradigm_combo.blockSignals(False)
 
     # ------------------------------------------------------------------
     # Event log
@@ -927,13 +1347,8 @@ class MainWindow(QMainWindow):
 
     def _log_event(self, action: str, item_name: str = "", detail: str = ""):
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        entry = {
-            "ts": ts,
-            "action": action,
-            "item": item_name,
-            "detail": detail,
-        }
-        self._exp.events.append(entry)
+        entry = {"ts": ts, "action": action, "item": item_name, "detail": detail}
+        self._session.events.append(entry)
         line = f"[{ts}] {action}"
         if item_name:
             line += f" | {item_name}"
@@ -942,53 +1357,36 @@ class MainWindow(QMainWindow):
         self._log_text.append(line)
 
     def _clear_log(self):
-        self._exp.events.clear()
+        self._session.events.clear()
         self._log_text.clear()
 
     # ------------------------------------------------------------------
     # Templates
     # ------------------------------------------------------------------
 
-    def _apply_paradigm(self, paradigm: dict):
-        self._exp.items = [
-            Item(it["kind"], it["name"]) for it in paradigm.get("items", [])
-        ]
-        self._exp.paradigm = paradigm.get("name", "")
-        self._field_paradigm.setText(self._exp.paradigm)
-        self._rebuild_item_rows()
-
-    def _load_default_paradigm_dialog(self):
-        names = [p["name"] for p in DEFAULT_PARADIGMS]
-        from PySide6.QtWidgets import QInputDialog
-        name, ok = QInputDialog.getItem(
-            self, "选择默认范式", "范式:", names, 0, False
-        )
-        if ok and name:
-            for p in DEFAULT_PARADIGMS:
-                if p["name"] == name:
-                    self._apply_paradigm(p)
-                    self.save_autosave()
-                    break
-
     def _save_template(self):
-        from PySide6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(
-            self, "保存模板", "模板名称:", text=self._exp.paradigm or "模板"
+            self, "保存模板", "模板名称:", text=self._session.paradigm or "模板"
         )
         if not ok or not name.strip():
             return
         name = name.strip()
         template = {
             "name": name,
-            "paradigm": self._exp.paradigm,
-            "items": [{"kind": it.kind, "name": it.name} for it in self._exp.items],
+            "_version": 2,
+            "session": self._session.to_dict(),
         }
-        # Save to file
         tpl_path = os.path.join(TEMPLATES_DIR, name + ".json")
         with open(tpl_path, "w", encoding="utf-8") as f:
             json.dump(template, f, ensure_ascii=False, indent=2)
-
-        save_recent_template(template)
+        recent_entry = {
+            "name": name,
+            "paradigm": self._session.paradigm,
+            "subject_count": sum(len(g.subjects) for g in self._session.groups),
+            "_version": 2,
+            "session": self._session.to_dict(),
+        }
+        save_recent_template(recent_entry)
         self._refresh_recent_list()
         QMessageBox.information(self, "保存成功", f"模板 [{name}] 已保存。")
 
@@ -1001,10 +1399,21 @@ class MainWindow(QMainWindow):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 tpl = json.load(f)
-            self._apply_paradigm(tpl)
-            save_recent_template(tpl)
-            self._refresh_recent_list()
+            self._apply_template(tpl)
+        except Exception as e:
+            QMessageBox.warning(self, "加载失败", str(e))
+
+    def _apply_template(self, tpl: dict):
+        try:
+            if tpl.get("_version", 1) >= 2 and "session" in tpl:
+                sess = Session.from_dict(tpl["session"])
+            else:
+                sess = Session._migrate_from_v1(tpl)
+            self._apply_session(sess)
             self.save_autosave()
+            QMessageBox.information(
+                self, "已加载", f"模板 [{tpl.get('name', '')}] 已加载。"
+            )
         except Exception as e:
             QMessageBox.warning(self, "加载失败", str(e))
 
@@ -1014,8 +1423,16 @@ class MainWindow(QMainWindow):
         for i, tpl in enumerate(recent):
             self._recent_list_widget.setItem(i, 0, QTableWidgetItem(tpl.get("name", "")))
             self._recent_list_widget.setItem(
-                i, 1, QTableWidgetItem(str(len(tpl.get("items", []))))
+                i, 1, QTableWidgetItem(tpl.get("paradigm", ""))
             )
+            if "session" in tpl:
+                n = sum(
+                    len(g.get("subjects", []))
+                    for g in tpl["session"].get("groups", [])
+                )
+            else:
+                n = tpl.get("subject_count", 0)
+            self._recent_list_widget.setItem(i, 2, QTableWidgetItem(str(n)))
 
     def _load_recent_selected(self):
         row = self._recent_list_widget.currentRow()
@@ -1025,11 +1442,8 @@ class MainWindow(QMainWindow):
         recent = load_recent_templates()
         if row >= len(recent):
             return
-        tpl = recent[row]
-        self._apply_paradigm(tpl)
-        save_recent_template(tpl)
+        self._apply_template(recent[row])
         self._refresh_recent_list()
-        self.save_autosave()
 
     # ------------------------------------------------------------------
     # Settings
@@ -1040,16 +1454,8 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             self._settings = dlg.get_settings()
             save_settings(self._settings)
-            self._apply_hotkeys()
-            self._hk_info_label.setText(
-                "当前快捷键：\n" + self._hotkey_summary()
-            )
-            # Update button labels
+            self._hk_info_label.setText("当前快捷键：\n" + self._hotkey_summary())
             hk = self._settings["hotkeys"]
-            self._btn_start_stop.setText(
-                f"开始实验 ({hk.get('start_stop', 'F5')})"
-            )
-            self._btn_reset.setText(f"重置 ({hk.get('reset', 'F6')})")
             self._btn_export_default.setText(
                 f"导出到默认目录 ({hk.get('export', 'F7')})"
             )
@@ -1058,52 +1464,71 @@ class MainWindow(QMainWindow):
     # Excel export
     # ------------------------------------------------------------------
 
-    def build_export_filename(self) -> str:
-        date = safe_name_part(self._exp.date) or datetime.now().strftime("%Y-%m-%d")
-        mouse = safe_name_part(self._exp.mouse_id)
-        group = safe_name_part(self._exp.group)
-        paradigm = safe_name_part(self._exp.paradigm)
-
-        parts = [date]
-        if mouse:
-            parts.append(mouse)
-        if group:
-            parts.append(group)
-        if paradigm:
-            parts.append(paradigm)
-
+    def _build_export_filename(self) -> str:
+        date = safe_name_part(self._session.date) or datetime.now().strftime("%Y-%m-%d")
+        paradigm = safe_name_part(self._session.paradigm)
+        operator = safe_name_part(self._session.operator)
+        parts = [date, paradigm]
+        if operator:
+            parts.append(operator)
         return "_".join(parts) + ".xlsx"
 
-    def freeze_running_timers_before_export(self):
-        for item in self._exp.items:
-            if item.kind == "timer" and item.running and item.last_start_ts is not None:
-                item.elapsed += time.perf_counter() - item.last_start_ts
-                item.running = False
-                item.last_start_ts = None
+    def _freeze_all_timers(self):
+        for group in self._session.groups:
+            for subj in group.subjects:
+                for it in subj.items:
+                    if it.kind == "timer" and it.running and it.last_start_ts is not None:
+                        it.elapsed += time.perf_counter() - it.last_start_ts
+                        it.running = False
+                        it.last_start_ts = None
 
-    def write_excel_to_path(self, path: str):
+    def _write_excel_to_path(self, path: str):
         wb = Workbook()
+        ws = wb.active
+        ws.title = self._session.paradigm
 
-        ws1 = wb.active
-        ws1.title = "实验结果"
-        ws1.append(["字段", "值"])
-        ws1.append(["日期", self._exp.date])
-        ws1.append(["实验员", self._exp.operator])
-        ws1.append(["实验鼠ID", self._exp.mouse_id])
-        ws1.append(["组别", self._exp.group])
-        ws1.append(["范式", self._exp.paradigm])
-        ws1.append(["备注", self._exp.remark])
-        ws1.append([])
-        ws1.append(["项目", "类型", "值"])
-        for it in self._exp.items:
-            value = fmt_mmssxx(it.elapsed) if it.kind == "timer" else it.count
-            typ = "计时" if it.kind == "timer" else "计数"
-            ws1.append([it.name, typ, value])
+        ws.append(["范式", self._session.paradigm])
+        ws.append(["日期", self._session.date])
+        ws.append(["实验员", self._session.operator])
+        ws.append(["备注", self._session.remark])
+        ws.append([])
+
+        if self._session.paradigm == PARADIGM_3SIT:
+            ws.append(
+                ["组别", "对象名", "Mice/s", "Toy/s",
+                 "Mice-Toy/s", "Mice+Toy/s", "DI"]
+            )
+            for group in self._session.groups:
+                for subj in group.subjects:
+                    mice = subj.get_value("Mice/s")
+                    toy = subj.get_value("Toy/s")
+                    ws.append([
+                        group.name,
+                        subj.name,
+                        fmt_ssxx(mice),
+                        fmt_ssxx(toy),
+                        fmt_ssxx_signed(mice - toy),
+                        fmt_ssxx(mice + toy),
+                        calc_di(mice, toy),
+                    ])
+        else:
+            ws.append(
+                ["组别", "对象名", "适应时间/s", "嗅探时间/s", "躲避次数"]
+            )
+            for group in self._session.groups:
+                for subj in group.subjects:
+                    ws.append([
+                        group.name,
+                        subj.name,
+                        fmt_ssxx(subj.get_value("适应时间/s")),
+                        fmt_ssxx(subj.get_value("嗅探时间/s")),
+                        int(subj.get_value("躲避次数")),
+                    ])
 
         ws2 = wb.create_sheet("事件日志")
         ws2.append(["时间戳", "动作", "项目", "详情"])
-        for e in self._exp.events:
-            ws2.append([e["ts"], e["action"], e["item"], e["detail"]])
+        for e in self._session.events:
+            ws2.append([e["ts"], e["action"], e.get("item", ""), e.get("detail", "")])
 
         wb.save(path)
         QApplication.beep()
@@ -1111,30 +1536,24 @@ class MainWindow(QMainWindow):
         self.save_autosave()
 
     def export_excel_default(self):
-        self.freeze_running_timers_before_export()
-        fname = self.build_export_filename()
+        self._freeze_all_timers()
+        fname = self._build_export_filename()
         path = os.path.join(EXPORT_DIR, fname)
-
-        # Avoid overwriting existing file
         base, ext = os.path.splitext(path)
         idx = 1
         while os.path.exists(path):
             path = f"{base}_{idx}{ext}"
             idx += 1
-
         try:
-            self.write_excel_to_path(path)
-            QMessageBox.information(
-                self, "导出成功", f"已导出到默认目录：\n{path}"
-            )
+            self._write_excel_to_path(path)
+            QMessageBox.information(self, "导出成功", f"已导出到默认目录：\n{path}")
         except Exception as e:
             QMessageBox.warning(self, "导出失败", str(e))
 
     def export_excel_as(self):
-        self.freeze_running_timers_before_export()
-        fname = self.build_export_filename()
+        self._freeze_all_timers()
+        fname = self._build_export_filename()
         default_path = os.path.join(EXPORT_DIR, fname)
-
         path, _ = QFileDialog.getSaveFileName(
             self, "另存为", default_path, "Excel Files (*.xlsx)"
         )
@@ -1142,9 +1561,8 @@ class MainWindow(QMainWindow):
             return
         if not path.lower().endswith(".xlsx"):
             path += ".xlsx"
-
         try:
-            self.write_excel_to_path(path)
+            self._write_excel_to_path(path)
             QMessageBox.information(self, "导出成功", f"已导出：\n{path}")
         except Exception as e:
             QMessageBox.warning(self, "导出失败", str(e))
@@ -1166,7 +1584,7 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("MiceTimer")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationVersion("2.0.0")
 
     window = MainWindow()
     window.show()
