@@ -140,7 +140,7 @@ def calc_di(mice_s: float, toy_s: float) -> str:
     return f"{(mice_s - toy_s) / mice_plus_toy:.6f}"
 
 
-def calc_di_numeric(mice_s: float, toy_s: float):
+def calc_di_numeric(mice_s: float, toy_s: float) -> Optional[float]:
     """Return DI = (Mice-Toy)/(Mice+Toy) as float, or None if denominator is 0."""
     total = mice_s + toy_s
     if total == 0:
@@ -1507,9 +1507,11 @@ class MainWindow(QMainWindow):
         if paradigm == PARADIGM_3SIT:
             col_headers = ["", "Mice/s", "Toy/s", "Mice-Toy/s", "Mice+Toy/s", "DI"]
             col_widths = [14, 12, 12, 14, 14, 16]
+            di_col = col_headers.index("DI") + 1  # 1-indexed column number for DI
         else:
             col_headers = ["", "适应时间/s", "嗅探时间/s", "躲避次数"]
             col_widths = [14, 14, 14, 12]
+            di_col = None
 
         ncols = len(col_headers)
 
@@ -1586,7 +1588,7 @@ class MainWindow(QMainWindow):
 
                     di_val = calc_di_numeric(mice, toy)
                     di_cell = ws.cell(
-                        row=row, column=6, value=di_val if di_val is not None else ""
+                        row=row, column=di_col, value=di_val if di_val is not None else ""
                     )
                     if di_val is not None:
                         di_cell.number_format = "0.000000"
