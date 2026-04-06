@@ -130,6 +130,14 @@ def safe_name_part(s: str) -> str:
     return "".join(c for c in s if c.isalnum() or c in "-_ ")[:MAX_FILENAME_PART_LENGTH].strip()
 
 
+def calc_di(mice_s: float, toy_s: float) -> str:
+    """Return DI = (Mice-Toy)/(Mice+Toy) formatted to 6 decimal places, or '' if denominator is 0."""
+    mice_plus_toy = mice_s + toy_s
+    if mice_plus_toy == 0:
+        return ""
+    return f"{(mice_s - toy_s) / mice_plus_toy:.6f}"
+
+
 # ---------------------------------------------------------------------------
 # Settings helpers
 # ---------------------------------------------------------------------------
@@ -338,6 +346,7 @@ class Session:
         paradigm_map = {
             "三箱社交": PARADIGM_3SIT,
             "自由社交": PARADIGM_FREESIT,
+            # v1 "都做" combined both paradigms; default to 3-SIT for migration
             "都做": PARADIGM_3SIT,
         }
         sess.paradigm = paradigm_map.get(d.get("paradigm", ""), PARADIGM_3SIT)
@@ -909,14 +918,12 @@ class SummaryTableWidget(QWidget):
             mice = subj.get_value("Mice/s")
             toy = subj.get_value("Toy/s")
             mice_toy = mice - toy
-            mice_plus_toy = mice + toy
-            di_str = f"{mice_toy / mice_plus_toy:.6f}" if mice_plus_toy != 0 else ""
 
             self._table.setItem(row, 1, QTableWidgetItem(fmt_ssxx(mice)))
             self._table.setItem(row, 2, QTableWidgetItem(fmt_ssxx(toy)))
             self._table.setItem(row, 3, QTableWidgetItem(fmt_ssxx_signed(mice_toy)))
-            self._table.setItem(row, 4, QTableWidgetItem(fmt_ssxx(mice_plus_toy)))
-            self._table.setItem(row, 5, QTableWidgetItem(di_str))
+            self._table.setItem(row, 4, QTableWidgetItem(fmt_ssxx(mice + toy)))
+            self._table.setItem(row, 5, QTableWidgetItem(calc_di(mice, toy)))
         else:
             adapt = subj.get_value("适应时间/s")
             sniff = subj.get_value("嗅探时间/s")
@@ -1010,16 +1017,14 @@ class SummaryTableWidget(QWidget):
                 mice = subj.get_value("Mice/s")
                 toy = subj.get_value("Toy/s")
                 mice_toy = mice - toy
-                mice_plus_toy = mice + toy
-                di_str = f"{mice_toy / mice_plus_toy:.6f}" if mice_plus_toy != 0 else ""
 
                 for col, txt in enumerate(
                     [
                         fmt_ssxx(mice),
                         fmt_ssxx(toy),
                         fmt_ssxx_signed(mice_toy),
-                        fmt_ssxx(mice_plus_toy),
-                        di_str,
+                        fmt_ssxx(mice + toy),
+                        calc_di(mice, toy),
                     ],
                     start=1,
                 ):
@@ -1497,21 +1502,14 @@ class MainWindow(QMainWindow):
                 for subj in group.subjects:
                     mice = subj.get_value("Mice/s")
                     toy = subj.get_value("Toy/s")
-                    mice_toy = mice - toy
-                    mice_plus_toy = mice + toy
-                    di_str = (
-                        f"{mice_toy / mice_plus_toy:.6f}"
-                        if mice_plus_toy != 0
-                        else ""
-                    )
                     ws.append([
                         group.name,
                         subj.name,
                         fmt_ssxx(mice),
                         fmt_ssxx(toy),
-                        fmt_ssxx_signed(mice_toy),
-                        fmt_ssxx(mice_plus_toy),
-                        di_str,
+                        fmt_ssxx_signed(mice - toy),
+                        fmt_ssxx(mice + toy),
+                        calc_di(mice, toy),
                     ])
         else:
             ws.append(
