@@ -43,6 +43,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -136,6 +138,14 @@ def calc_di(mice_s: float, toy_s: float) -> str:
     if mice_plus_toy == 0:
         return ""
     return f"{(mice_s - toy_s) / mice_plus_toy:.6f}"
+
+
+def calc_di_numeric(mice_s: float, toy_s: float) -> Optional[float]:
+    """Return DI = (Mice-Toy)/(Mice+Toy) as float, or None if denominator is 0."""
+    total = mice_s + toy_s
+    if total == 0:
+        return None
+    return (mice_s - toy_s) / total
 
 
 # ---------------------------------------------------------------------------
@@ -1487,44 +1497,129 @@ class MainWindow(QMainWindow):
         ws = wb.active
         ws.title = self._session.paradigm
 
-        ws.append(["范式", self._session.paradigm])
-        ws.append(["日期", self._session.date])
-        ws.append(["实验员", self._session.operator])
-        ws.append(["备注", self._session.remark])
-        ws.append([])
+        paradigm = self._session.paradigm
 
-        if self._session.paradigm == PARADIGM_3SIT:
-            ws.append(
-                ["组别", "对象名", "Mice/s", "Toy/s",
-                 "Mice-Toy/s", "Mice+Toy/s", "DI"]
+        # Derive batch prefix from remark (if set) or date
+        batch_prefix = self._session.remark.strip() if self._session.remark.strip() else self._session.date
+        batch_title = f"{batch_prefix}-{paradigm}" if batch_prefix else paradigm
+
+        # Column definitions per paradigm
+        if paradigm == PARADIGM_3SIT:
+            col_headers = ["", "Mice/s", "Toy/s", "Mice-Toy/s", "Mice+Toy/s", "DI"]
+            col_widths = [14, 12, 12, 14, 14, 16]
+            di_col = col_headers.index("DI") + 1  # 1-indexed column number for DI
+        else:
+            col_headers = ["", "适应时间/s", "嗅探时间/s", "躲避次数"]
+            col_widths = [14, 14, 14, 12]
+            di_col = None
+
+        ncols = len(col_headers)
+
+        # Set column widths
+        for c_idx, w in enumerate(col_widths, start=1):
+            ws.column_dimensions[get_column_letter(c_idx)].width = w
+
+        # Style helpers
+        font_title = Font(bold=True, size=12)
+        font_header = Font(bold=True, size=10)
+        font_group = Font(bold=True, color="FFFFFF", size=10)
+        align_center = Alignment(horizontal="center", vertical="center")
+        align_left = Alignment(horizontal="left", vertical="center", indent=1)
+        fill_control = PatternFill("solid", fgColor="4A6741")
+        fill_experiment = PatternFill("solid", fgColor="3A5978")
+
+        row = 1
+
+        # --- Title row (merged, centered) ---
+        title_cell = ws.cell(row=row, column=1, value=batch_title)
+        ws.merge_cells(
+            start_row=row, start_column=1, end_row=row, end_column=ncols
+        )
+        title_cell.font = font_title
+        title_cell.alignment = align_center
+        ws.row_dimensions[row].height = 22
+        row += 1
+
+        # --- Header row ---
+        for c_idx, hdr in enumerate(col_headers, start=1):
+            cell = ws.cell(row=row, column=c_idx, value=hdr)
+            cell.font = font_header
+            cell.alignment = align_center
+        ws.row_dimensions[row].height = 18
+        row += 1
+
+        # --- Group blocks ---
+        for group in self._session.groups:
+            # Group title row (merged)
+            group_cell = ws.cell(row=row, column=1, value=group.name)
+            ws.merge_cells(
+                start_row=row, start_column=1, end_row=row, end_column=ncols
             )
-            for group in self._session.groups:
-                for subj in group.subjects:
+            group_fill = fill_control if group.name == GROUP_CONTROL else fill_experiment
+            group_cell.fill = group_fill
+            group_cell.font = font_group
+            group_cell.alignment = align_left
+            ws.row_dimensions[row].height = 18
+            row += 1
+
+            # Subject rows
+            for subj in group.subjects:
+                name_cell = ws.cell(row=row, column=1, value=subj.name)
+                name_cell.alignment = align_center
+
+                if paradigm == PARADIGM_3SIT:
                     mice = subj.get_value("Mice/s")
                     toy = subj.get_value("Toy/s")
-                    ws.append([
-                        group.name,
-                        subj.name,
-                        fmt_ssxx(mice),
-                        fmt_ssxx(toy),
-                        fmt_ssxx_signed(mice - toy),
-                        fmt_ssxx(mice + toy),
-                        calc_di(mice, toy),
-                    ])
-        else:
-            ws.append(
-                ["组别", "对象名", "适应时间/s", "嗅探时间/s", "躲避次数"]
-            )
-            for group in self._session.groups:
-                for subj in group.subjects:
-                    ws.append([
-                        group.name,
-                        subj.name,
-                        fmt_ssxx(subj.get_value("适应时间/s")),
-                        fmt_ssxx(subj.get_value("嗅探时间/s")),
-                        int(subj.get_value("躲避次数")),
-                    ])
+                    mice_toy = mice - toy
+                    mice_plus_toy = mice + toy
 
+                    for c_idx, (val, fmt) in enumerate(
+                        [
+                            (round(mice, 2), "0.00"),
+                            (round(toy, 2), "0.00"),
+                            (round(mice_toy, 2), "0.00"),
+                            (round(mice_plus_toy, 2), "0.00"),
+                        ],
+                        start=2,
+                    ):
+                        cell = ws.cell(row=row, column=c_idx, value=val)
+                        cell.number_format = fmt
+                        cell.alignment = align_center
+
+                    di_val = calc_di_numeric(mice, toy)
+                    di_cell = ws.cell(
+                        row=row, column=di_col, value=di_val if di_val is not None else ""
+                    )
+                    if di_val is not None:
+                        di_cell.number_format = "0.000000"
+                    di_cell.alignment = align_center
+
+                else:  # Free-SIT
+                    adapt = subj.get_value("适应时间/s")
+                    sniff = subj.get_value("嗅探时间/s")
+                    avoid = int(subj.get_value("躲避次数"))
+
+                    for c_idx, (val, fmt) in enumerate(
+                        [
+                            (round(adapt, 2), "0.00"),
+                            (round(sniff, 2), "0.00"),
+                        ],
+                        start=2,
+                    ):
+                        cell = ws.cell(row=row, column=c_idx, value=val)
+                        cell.number_format = fmt
+                        cell.alignment = align_center
+
+                    avoid_cell = ws.cell(row=row, column=4, value=avoid)
+                    avoid_cell.alignment = align_center
+
+                ws.row_dimensions[row].height = 16
+                row += 1
+
+        # Blank separator row after block
+        row += 1
+
+        # --- Events sheet ---
         ws2 = wb.create_sheet("事件日志")
         ws2.append(["时间戳", "动作", "项目", "详情"])
         for e in self._session.events:
